@@ -51,7 +51,6 @@ INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
-Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 
 # Fit-mode constants, calibrated on this game's recorded launch (see README).
 DAMP = 0.9            # damping of fitted slopes over the extrapolation
@@ -83,6 +82,35 @@ def inv_logit(lg):
         return 100 / (1 + math.exp(-lg))
     e = math.exp(lg)
     return 100 * e / (1 + e)
+
+
+def norm_ppf(p):
+    """The standard normal's quantile at p (Acklam's rational approximation).
+
+    The contest fixes the levels at [0.05, 0.25, 0.5, 0.75, 0.95], but the program
+    reads them from the case and converts them itself, so any levels a case carries
+    are honored exactly rather than assumed.
+    """
+    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285984469534e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
+    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01]
+    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
+    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+         3.754408661907416e+00]
+    if p < 0.02425:
+        q = math.sqrt(-2 * math.log(p))
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
+               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+    if p > 0.97575:
+        q = math.sqrt(-2 * math.log(1 - p))
+        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
+                ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+    q = p - 0.5
+    r = q * q
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / \
+           (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
 
 
 def parse_ts(s):
@@ -201,7 +229,7 @@ def cold_gamma(trophy, r_last):
     return 0.35 + 0.35 * min(1.0, max(0.0, (logit(r_last) + 4.6) / 1.5))
 
 
-def cold_forecast(case, states):
+def cold_forecast(case, states, zs):
     last = states[-1]
     t_target = last["t"] + case["horizon_minutes"] / 60.0
     p_hat = math.exp(P_LAW_A + P_LAW_B * math.log(max(t_target, -1.9) + 2))
@@ -217,14 +245,14 @@ def cold_forecast(case, states):
             continue
         e_hat = max(r / 100 * (last["players"] or 1), 0.35) * ratio ** cold_gamma(tr, r)
         med = logit(max(min(99.0, e_hat / p_hat * 100), 0.01))
-        q = sorted(round(inv_logit(med + z * COLD_SIGMA), 4) for z in Z)
+        q = sorted(round(inv_logit(med + z * COLD_SIGMA), 4) for z in zs)
         rows.append({"id": tr["id"], "q": q})
     return rows
 
 
 # ---------------------------------------------------------------- fit mode
 
-def fit_forecast(case, states):
+def fit_forecast(case, states, zs):
     t_last = states[-1]["t"]
     t_target = t_last + case["horizon_minutes"] / 60.0
     x = lambda t: math.log(1 + max(t, 0.0) / 24.0)
@@ -355,7 +383,7 @@ def fit_forecast(case, states):
 
     rows = []
     for i, tr in enumerate(trophies):
-        q = sorted(round(inv_logit(medians[i] + z * sigmas[i]), 4) for z in Z)
+        q = sorted(round(inv_logit(medians[i] + z * sigmas[i]), 4) for z in zs)
         rows.append({"id": tr["id"], "q": q})
     return rows
 
@@ -365,9 +393,11 @@ def forecast_case(case):
     states = distinct_states(case, epoch)
     if not states:
         raise ValueError("case has no history")
+    levels = case.get("levels") or LEVELS
+    zs = [norm_ppf(tau) for tau in levels]
     if len(states) <= 1:
-        return cold_forecast(case, states)
-    return fit_forecast(case, states)
+        return cold_forecast(case, states, zs)
+    return fit_forecast(case, states, zs)
 
 
 def main():
